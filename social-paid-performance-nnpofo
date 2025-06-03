@@ -23,10 +23,7 @@ sum(new_customer_transactions) as new_customer_transactions
 FROM `tpw-data-warehouse.data_marts.channel_performance_social_paid_v2` 
 
 where 1=1
-  and (lower(ad_name) like '%fixed offer%' 
-    OR lower(ad_name) like '%100% protein 5kg offer%' 
-    OR lower(ad_name) like '%vegan protein 4kg offer%' 
-    OR lower(ad_name) like '%dmr 4kg offer%')
+  and (lower(ad_name) like '%fixed offer%')
 
   and country = "UK"
   -- and date between "2025-0-01" and "2025-05-31"
