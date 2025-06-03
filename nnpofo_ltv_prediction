@@ -1,0 +1,366 @@
+
+
+with transactions_data_by_pl_params as
+(
+  -- Meta
+  SELECT
+  date,
+  country,
+  case when trim(split(campaign, '|')[safe_offset(1)]) = 'fb' then 'facebook'
+  when trim(split(campaign, '|')[safe_offset(1)]) = 'ig' then 'instagram'
+  when trim(split(campaign, '|')[safe_offset(1)]) = 'msg' then 'messenger'
+  when trim(split(campaign, '|')[safe_offset(1)]) = 'an' then 'audience_network' else '-' end as publisher_platform,
+  IFNULL(trim(split(split(campaign, '|')[safe_offset(0)],'_')[safe_offset(0)]),'-') as pl_campaign_id,
+  IFNULL(trim(split(split(campaign, '|')[safe_offset(0)],'_')[safe_offset(1)]),'-') as pl_adset_id,
+  IFNULL(trim(split(split(campaign, '|')[safe_offset(0)],'_')[safe_offset(2)]),'-') as pl_ad_id,
+  transaction_id,
+  transaction_count
+  FROM
+  `tpw-data-warehouse.data_marts.transactions`
+  WHERE default_channel_grouping = 'Social Paid'
+  and upper(source) <> 'TIKTOK'
+ 
+
+  UNION DISTINCT
+
+  -- TikTok
+  SELECT
+  date,
+  country,
+  case when trim(split(campaign, '|')[safe_offset(1)]) = 'fb' then 'facebook'
+  when trim(split(campaign, '|')[safe_offset(1)]) = 'ig' then 'instagram'
+  when trim(split(campaign, '|')[safe_offset(1)]) = 'msg' then 'messenger'
+  when trim(split(campaign, '|')[safe_offset(1)]) = 'an' then 'audience_network' else '-' end as publisher_platform,
+  IFNULL(trim(split(split(campaign, '|')[safe_offset(0)],'_')[safe_offset(0)]),'-') as pl_campaign_id,
+  IFNULL(trim(split(split(campaign, '|')[safe_offset(0)],'_')[safe_offset(1)]),'-') as pl_adset_id,
+  IFNULL(trim(split(split(campaign, '|')[safe_offset(0)],'_')[safe_offset(2)]),'-') as pl_ad_id,
+  transaction_id,
+  transaction_count
+  FROM
+  `tpw-data-warehouse.data_marts.transactions`
+  WHERE default_channel_grouping = 'Social Paid'
+  and upper(source) = 'TIKTOK'
+),
+fixed_offer_ads as 
+(
+SELECT 
+distinct
+campaign_id,
+ad_id,
+adset_id,
+FROM `tpw-data-warehouse.data_marts.channel_performance_social_paid_v2` 
+
+where 1=1
+  and (lower(ad_name) like '%fixed offer%' 
+    OR lower(ad_name) like '%100% protein 5kg offer%' 
+    OR lower(ad_name) like '%vegan protein 4kg offer%' 
+    OR lower(ad_name) like '%dmr 4kg offer%')
+
+  and country = "UK"
+  -- and date between "2025-0-01" and "2025-05-31"
+),
+fixed_offer_transaction_ids as 
+
+(
+  select  transaction_id from transactions_data_by_pl_params t1
+inner join fixed_offer_ads t2
+  on t2.campaign_id = t1.pl_campaign_id
+  and t2.adset_id = t1.pl_adset_id
+  and t2.ad_id = t1.pl_ad_id 
+where t1.country = "UK" and t1.transaction_count = 1
+),
+fixed_offer_ad_spend_per_month as 
+(
+SELECT 
+date_trunc(date , month) as acquisition_month,
+"UK" as country,
+REGEXP_EXTRACT(ad_name, r' \| ([A-Z0-9]+)$') AS config_sku_regex,
+sum(spend) as spend,
+FROM `tpw-data-warehouse.data_marts.channel_performance_social_paid_v2` 
+
+where 1=1
+  and (lower(ad_name) like '%fixed offer%' 
+    OR lower(ad_name) like '%100% protein 5kg offer%' 
+    OR lower(ad_name) like '%vegan protein 4kg offer%' 
+    OR lower(ad_name) like '%dmr 4kg offer%')
+
+  and country = "UK"
+  -- and date between "2025-0-01" and "2025-05-31"
+group by date_trunc(date , month), config_sku_regex 
+),
+
+
+-- one_year_ltv_prediction_new_media_spend_platinum_channel_country_level_v2 -- 
+
+product_names_by_config_sku as
+(
+  SELECT UPPER(config_sku) AS config_sku,
+  TRIM(product_name) AS product_name,
+  count(*) over (partition by config_sku, TRIM(product_name)) as product_name_quantity,
+  FROM `tpw-data-warehouse.data_lake.md_product_attributes`
+  where sales_category = 'Gold' -- platinum_product = 1
+),
+platinum_by_config_sku as
+(
+  select *,
+  row_number() over (partition by config_sku order by product_name_quantity desc, product_name) as position
+  from product_names_by_config_sku
+  qualify position = 1
+),
+union_spend as 
+(
+  select date,
+  country,
+  channel,
+  TPW_Channels,
+  categorised_sources_union.config_sku,
+  sum(impressions) as impressions,
+  sum(clicks) as clicks,
+  sum(spend) as spend
+  from
+  (
+    select date,
+    country,
+    'Paid Search' as channel,
+    TPW_Channels,
+    t1.config_sku,
+    impressions,
+    clicks,
+    spend
+    from `tpw-data-warehouse.data_warehouse.gads_spend_by_country_config_sku_and_tpw_channel_excluding_bundles`  t1
+    UNION ALL
+    select date,
+    country,
+    'Social Paid' as channel,
+    'Social Paid' as TPW_Channels,
+    config_sku,
+    impressions,
+    clicks,
+    spend
+    from `tpw-data-warehouse.data_warehouse.facebook_spend_by_country_and_config_sku_excluding_bundles`
+    UNION ALL
+    select date,
+    country,
+    'Social Paid' as channel,
+    'Social Paid' as TPW_Channels,
+    config_sku,
+    impressions,
+    clicks,
+    spend
+    from `tpw-data-warehouse.data_warehouse.tiktok_spend_by_country_and_config_sku_excluding_bundles`   
+  )categorised_sources_union
+  inner join platinum_by_config_sku t2 on categorised_sources_union.config_sku = t2.config_sku
+  group by date,
+  country,
+  channel,
+  TPW_Channels,
+  config_sku
+),
+total_spend_by_month_config_sku_and_channel as
+(
+  select date_trunc(date,month) as month, 
+  country, 
+  channel,
+  TPW_Channels, 
+  config_sku, 
+  sum(spend) as spend
+  from union_spend
+  group by month, country, channel, TPW_Channels, config_sku
+),
+customers_acquired_with_platinum as 
+(
+  select distinct
+  t1.acquisition_date,
+  t1.email_address,
+  t1.config_sku,
+  t1.transaction_id,
+  t1.acquisition_default_channel_grouping,
+  t1.TPW_Acquisition_Channels,
+  t2.acquisition_country
+  from `data_marts.transaction_products_p` t1
+  inner join `tpw-data-warehouse.data_marts.transactions` t2 on t1.transaction_id = t2.transaction_id
+  inner join platinum_by_config_sku t3 on t1.config_sku = t3.config_sku
+  where t1.transaction_count = 1
+  and bundle_sku is null
+),
+ltv as 
+(
+  select
+  date_trunc(t1.acquisition_date,month) as acquisition_month,
+  t1.email_address,
+  t1.config_sku as acquisition_config_sku,
+  t1.acquisition_default_channel_grouping,
+  t1.TPW_Acquisition_Channels,
+  t1.acquisition_country,
+  sum(coalesce(case when t1.acquisition_date >= "2024-01-01" then partnerize.commission else awin.commission_amount end,0)) as affiliate_commission,
+  sum(case when t2.transaction_count = 1 then t2.product_revenue_ex_vat + t2.delivery_revenue_ex_vat else 0 end) as first_order_net_revenue_ex_vat,
+  sum(case when date_trunc(t1.acquisition_date,month) = date_trunc(t2.date,month) then t2.product_revenue_ex_vat + t2.delivery_revenue_ex_vat - product_materials_cost - product_packaging_cost - product_labour_cost else 0 end) as acquisition_month_net_revenue_with_cost,
+  sum(t2.product_revenue_ex_vat + t2.delivery_revenue_ex_vat - product_materials_cost - product_packaging_cost - product_labour_cost) as net_ltv_with_cost,
+
+  sum(case when t2.transaction_count = 1 then coalesce(t2.product_packaging_cost,0) else 0 end) as packaging_cost,
+  sum(case when t2.transaction_count = 1 then coalesce(t2.product_materials_cost,0) else 0 end) as materials_cost,
+  sum(case when t2.transaction_count = 1 then coalesce(t2.product_labour_cost,0) else 0 end) as labour_cost,
+  sum(case when t2.transaction_count = 1 then coalesce(t2.cpu_cost,0) else 0 end) as fulfilment_cost,
+  sum(case when t2.transaction_count = 1 then coalesce(t2.payment_processing_costs,0) else 0 end) as payment_processing_cost,
+  sum(case when t2.transaction_count = 1 then coalesce(t2.delivery_internal_cost_gbp,0) else 0 end) as delivery_internal_cost,
+
+  sum(case when t2.transaction_count = 1 then coalesce(t2.delivery_revenue_ex_vat,0) else 0 end) as net_delivery_revenue,
+  sum(case when t2.transaction_count = 1 then coalesce(t2.product_revenue_ex_vat,0) else 0 end) as net_product_revenue,
+
+  max(t2.transaction_count) as current_frequency,
+  max(case when date_diff(t2.date,t1.acquisition_date,day) <= 30 then t2.transaction_count else null end) as one_month_frequency,
+  max(case when date_diff(t2.date,t1.acquisition_date,day) <= 90 then t2.transaction_count else null end) as three_month_frequency,
+  max(case when date_diff(t2.date,t1.acquisition_date,day) <= 180 then t2.transaction_count else null end) six_month_frequency
+  from customers_acquired_with_platinum t1
+  left join `data_marts.transactions` t2 on t1.email_address = t2.email_address
+  left join (select * from `data_lake.partnerize_conversions` where status <> 'rejected') partnerize #Partnerize Commissions (From 1st Jan 2024)
+  on trim(t1.transaction_id) = trim(partnerize.transaction_id)
+  left join `data_lake.aw_campaigns_transaction_level` awin #Awin Commissions (Before 1st Jan 2024)
+  on trim(t1.transaction_id) = trim(awin.order_ref)
+  where date_diff(t2.date,t1.acquisition_date,month) <= 12 #add 1 year retention rate to other year ltvs  #with ltv within given months #######################
+
+  and t2.transaction_id not in (select transaction_id from fixed_offer_transaction_ids) -- Not in transaction_ids
+
+  group by t1.acquisition_date, t1.acquisition_country, email_address, acquisition_config_sku, acquisition_default_channel_grouping, TPW_Acquisition_Channels
+),
+customers_acquired_during_last_completed_cohort as 
+(
+  select
+  acquisition_month as last_completed_cohort,
+  acquisition_config_sku,
+  acquisition_country,
+  acquisition_default_channel_grouping,
+  TPW_Acquisition_Channels,
+  sum(acquisition_month_net_revenue_with_cost) as prediction_numerator,
+  sum(net_ltv_with_cost) as prediction_denominator
+  from ltv
+  where acquisition_month > date_sub(date_trunc(current_date(),month),interval 24 month)
+  and acquisition_month <= date_sub(date_trunc(current_date(),month),interval 12 month)
+  group by last_completed_cohort, acquisition_config_sku, acquisition_country, acquisition_default_channel_grouping, TPW_Acquisition_Channels
+),
+data as 
+(
+  select
+  t1.acquisition_month,
+  t1.acquisition_country,
+  t1.acquisition_config_sku,
+  t1.acquisition_default_channel_grouping,
+  t1.TPW_Acquisition_Channels,
+  sum(t1.first_order_net_revenue_ex_vat) as total_first_order_net_revenue_ex_vat,
+  sum(t1.affiliate_commission) as affiliate_commission,
+  count(distinct t1.email_address) as acquired_customers,
+  sum(t1.acquisition_month_net_revenue_with_cost) as acquisition_month_net_revenue_with_cost,
+  sum(t1.net_ltv_with_cost) as net_ltv_with_cost,
+  sum(t1.packaging_cost) as packaging_cost,
+  sum(t1.materials_cost) as materials_cost,
+  sum(t1.labour_cost) as labour_cost,
+  sum(fulfilment_cost) as fulfilment_cost,
+  sum(payment_processing_cost) as payment_processing_cost,
+  sum(delivery_internal_cost) as delivery_internal_cost,
+  sum(current_frequency) as total_frequency,
+  sum(net_product_revenue) as total_first_order_net_product_revenue,
+  sum(net_delivery_revenue) as total_first_order_net_delivery_revenue,
+  sum(case when one_month_frequency > 1 then 1 else 0 end) as number_of_customers_who_returned_within_30_days,
+  sum(case when three_month_frequency > 1 then 1 else 0 end) as number_of_customers_who_returned_within_90_days,
+  sum(case when six_month_frequency > 1 then 1 else 0 end) as number_of_customers_who_returned_within_180_days,
+  sum(case when current_frequency > 1 then 1 else 0 end) as number_of_customers_who_returned_within_year_period
+  from ltv t1
+  group by acquisition_month, acquisition_country, acquisition_config_sku, acquisition_default_channel_grouping, TPW_Acquisition_Channels
+),
+results as
+(
+  select
+  t1.acquisition_month,
+  t1.acquisition_country,
+  t1.acquisition_config_sku,
+  t1.acquisition_default_channel_grouping,
+  t1.TPW_Acquisition_Channels,
+  t1.total_first_order_net_revenue_ex_vat as total_first_order_net_revenue_ex_vat,
+  t1.affiliate_commission as affiliate_commission,
+  t1.acquired_customers as acquired_customers,
+  t1.acquisition_month_net_revenue_with_cost as acquisition_month_net_revenue_minus_cost,
+  t1.net_ltv_with_cost as net_ltv_minus_cost,
+  t1.packaging_cost as packaging_cost,
+  t1.materials_cost as materials_cost,
+  t1.labour_cost as labour_cost,
+  t1.fulfilment_cost as fulfilment_cost,
+  t1.payment_processing_cost as payment_processing_cost,
+  t1.delivery_internal_cost as delivery_internal_cost,
+  t1.total_first_order_net_product_revenue,
+  t1.total_first_order_net_delivery_revenue,
+  t1.total_frequency as total_frequency,
+  t1.number_of_customers_who_returned_within_30_days,
+  t1.number_of_customers_who_returned_within_90_days,
+  t1.number_of_customers_who_returned_within_180_days,
+  t1.number_of_customers_who_returned_within_year_period,
+  coalesce(t2.prediction_numerator,t3.prediction_numerator,0) as prediction_numerator,
+  coalesce(t2.prediction_denominator,t3.prediction_denominator,0) as prediction_denominator,
+  t3.last_completed_cohort
+  from data t1
+  left join customers_acquired_during_last_completed_cohort t2
+  on t1.acquisition_month >= t2.last_completed_cohort
+  and extract(month from t1.acquisition_month) = extract(month from t2.last_completed_cohort)
+  and t1.acquisition_config_sku = t2.acquisition_config_sku
+  and t1.acquisition_default_channel_grouping = t2.acquisition_default_channel_grouping
+  and t1.TPW_Acquisition_Channels = t2.TPW_Acquisition_Channels
+  and t1.acquisition_country = t2.acquisition_country
+  left join customers_acquired_during_last_completed_cohort t3
+  on t1.acquisition_month >= t3.last_completed_cohort
+  and extract(month from t3.last_completed_cohort) = extract(month from current_date)
+  and t1.acquisition_config_sku = t3.acquisition_config_sku
+  and t1.acquisition_default_channel_grouping = t3.acquisition_default_channel_grouping
+  and t1.TPW_Acquisition_Channels = t3.TPW_Acquisition_Channels
+  and t1.acquisition_country = t3.acquisition_country
+),
+ltv_and_spend as
+(
+  select 
+  coalesce(t1.acquisition_month,t0.month) as acquisition_month,
+  coalesce(t1.acquisition_country,t0.country) as country,
+  coalesce(t1.acquisition_config_sku,t0.config_sku) as acquisition_config_sku,
+  coalesce(t1.acquisition_default_channel_grouping,t0.channel) as acquisition_channels,
+  coalesce(t1.TPW_Acquisition_Channels,t0.TPW_Channels) as TPW_Acquisition_Channels,
+  t1.total_first_order_net_revenue_ex_vat,
+  t1.affiliate_commission,
+  t1.acquired_customers,
+  t1.acquisition_month_net_revenue_minus_cost,
+  t1.net_ltv_minus_cost,
+  t1.packaging_cost,
+  t1.materials_cost,
+  t1.labour_cost,
+  t1.fulfilment_cost,
+  t1.payment_processing_cost,
+  t1.delivery_internal_cost,
+  t1.total_frequency,
+  t1.total_first_order_net_product_revenue,
+  t1.total_first_order_net_delivery_revenue,
+  t1.number_of_customers_who_returned_within_30_days,
+  t1.number_of_customers_who_returned_within_90_days,
+  t1.number_of_customers_who_returned_within_180_days,
+  t1.number_of_customers_who_returned_within_year_period,
+  t1.prediction_numerator,
+  t1.prediction_denominator,
+  t1.last_completed_cohort,
+  sum(coalesce(t0.spend,0)) as total_spend
+  from results t1
+  full outer join total_spend_by_month_config_sku_and_channel t0
+  on t1.acquisition_month = t0.month
+  and trim(t1.acquisition_config_sku) = trim(t0.config_sku)
+  and trim(t1.acquisition_default_channel_grouping) = trim(t0.channel)
+  and trim(t1.TPW_Acquisition_Channels) = trim(t0.TPW_Channels)
+  and t1.acquisition_country = t0.country
+  group by acquisition_month, country, acquisition_config_sku, acquisition_channels, TPW_Acquisition_Channels, total_first_order_net_revenue_ex_vat, affiliate_commission, acquired_customers, acquisition_month_net_revenue_minus_cost, net_ltv_minus_cost, packaging_cost, materials_cost, labour_cost, fulfilment_cost, payment_processing_cost, delivery_internal_cost, total_frequency, total_first_order_net_product_revenue, total_first_order_net_delivery_revenue, number_of_customers_who_returned_within_30_days, number_of_customers_who_returned_within_90_days, number_of_customers_who_returned_within_180_days, number_of_customers_who_returned_within_year_period, prediction_numerator, prediction_denominator, last_completed_cohort
+),
+ltv_spend_platinum as 
+(
+select t1.*,
+t2.product_name as acquisition_product_name,
+t3.spend,
+t1.total_spend - ifnull(t3.spend,0) as total_spend_minus_fixed_offer
+from ltv_and_spend t1
+left join platinum_by_config_sku t2 on t1.acquisition_config_sku = t2.config_sku
+left join fixed_offer_ad_spend_per_month t3 on t1.acquisition_config_sku = t3.config_sku_regex and t1.acquisition_month = t3.acquisition_month and t1.country = t3.country and t1.TPW_Acquisition_Channels = "Social Paid" and t1.acquisition_channels = "Social Paid"
+)
+select * 
+from ltv_spend_platinum 
+where acquisition_month >= "2024-12-01" and country = "UK"
