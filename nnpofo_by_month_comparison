@@ -1,0 +1,46 @@
+with with_fixed_offer as
+(
+select 
+acquisition_month ,
+ (
+  SUM(total_first_order_net_revenue_ex_vat)
+  - SUM(materials_cost)
+  - SUM(labour_cost)
+  - SUM(fulfilment_cost)
+  - SUM(payment_processing_cost)
+  - SUM(packaging_cost)
+  - SUM(delivery_internal_cost)
+  - SUM(total_spend) -- Using total_spend as Total Media Spend
+    )/ nullif(SUM(acquired_customers), 0) AS NNPOFO
+from `data_marts.one_year_ltv_prediction_new_media_spend_platinum_channel_country_level_v2`
+
+where country = "UK" and acquisition_month >= "2024-12-01"
+group by acquisition_month
+),
+without_fixed_offer as 
+(
+  select 
+acquisition_month ,
+ (
+  SUM(total_first_order_net_revenue_ex_vat)
+  - SUM(materials_cost)
+  - SUM(labour_cost)
+  - SUM(fulfilment_cost)
+  - SUM(payment_processing_cost)
+  - SUM(packaging_cost)
+  - SUM(delivery_internal_cost)
+  - SUM(total_spend) -- Using total_spend as Total Media Spend
+    )/ nullif(SUM(acquired_customers), 0) AS NNPOFO
+from `tpw-data-warehouse.adamg_analysis.config_sku_nnpofo_no_fixed_offer_campaigns`
+
+where country = "UK" and acquisition_month >= "2024-12-01"
+group by acquisition_month 
+)
+
+select
+t1.acquisition_month,
+t1.NNPOFO as with_fixed_offer_NNPOFO,
+t2.NNPOFO as wihtout_fixed_offer_NNPOFO
+from with_fixed_offer t1
+left join without_fixed_offer t2
+  on t1.acquisition_month = t2.acquisition_month
