@@ -1,0 +1,18 @@
+
+SELECT 
+date_trunc(date,month) month,
+
+
+    (SUM(new_customer_product_revenue_ex_vat) + SUM(new_customer_delivery_revenue_ex_vat) - SUM(new_customer_product_materials_cost) - SUM(new_customer_product_labour_cost) - SUM(new_customer_product_packaging_cost) - SUM(new_customer_delivery_internal_cost) - SUM(spend)) / SUM(new_customer_transactions) as NNPOFO
+
+
+
+
+FROM `tpw-data-warehouse.data_marts.channel_performance_social_paid_v2` 
+
+where 1=1
+  and (lower(ad_name) like '%fixed offer%')
+
+  and country = "UK"
+  -- and date between "2025-0-01" and "2025-05-31"
+group by date_trunc(date,month)
